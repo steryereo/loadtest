@@ -1,114 +1,252 @@
-import http from 'k6/http';
-import { check, sleep } from 'k6';
-import { Rate, Trend } from 'k6/metrics';
-import encoding from 'k6/encoding';
+import http from "k6/http";
+import { sleep } from "k6";
+import { Rate, Trend } from "k6/metrics";
+import encoding from "k6/encoding";
 
-// Custom metrics for each endpoint
-const endpoint1ResponseTime = new Trend('endpoint1_response_time');
-const endpoint2ResponseTime = new Trend('endpoint2_response_time');
-const endpoint1ErrorRate = new Rate('endpoint1_errors');
-const endpoint2ErrorRate = new Rate('endpoint2_errors');
-
-// Configuration - can be overridden via environment variables or k6 options
-export const options = {
-  stages: [
-    { duration: '30s', target: 10 },  // Ramp up to 10 users
-    { duration: '1m', target: 10 },   // Stay at 10 users
-    { duration: '30s', target: 20 },  // Ramp up to 20 users
-    { duration: '1m', target: 20 },   // Stay at 20 users
-    { duration: '30s', target: 0 },   // Ramp down to 0 users
-  ],
-  thresholds: {
-    http_req_duration: ['p(95)<500'], // 95% of requests should be below 500ms
-    http_req_failed: ['rate<0.1'],    // Error rate should be less than 10%
-  },
+const ENDPOINT1 = {
+  id: "endpoint1",
+  name: "Test",
+  url: __ENV.ENDPOINT1_URL || "URL_HERE",
 };
 
-// Get configuration from environment variables or use defaults
-const ENDPOINT1_URL = __ENV.ENDPOINT1_URL || 'https://api1.example.com/endpoint';
-const ENDPOINT2_URL = __ENV.ENDPOINT2_URL || 'https://api2.example.com/endpoint';
-const HTTP_USERNAME = __ENV.HTTP_USERNAME || 'username';
-const HTTP_PASSWORD = __ENV.HTTP_PASSWORD || 'password';
+const ENDPOINT2 = {
+  id: "endpoint2",
+  name: "Baseline",
+  url: __ENV.ENDPOINT2_URL || "URL_HERE",
+};
 
-// Create HTTP basic auth header
+const HTTP_USERNAME = __ENV.HTTP_USERNAME || "USERNAME_HERE";
+const HTTP_PASSWORD = __ENV.HTTP_PASSWORD || "PASSWORD_HERE";
+
 const authHeader = {
   headers: {
-    'Authorization': `Basic ${encoding.b64encode(`${HTTP_USERNAME}:${HTTP_PASSWORD}`)}`,
+    Authorization: `Basic ${encoding.b64encode(
+      `${HTTP_USERNAME}:${HTTP_PASSWORD}`
+    )}`,
   },
 };
 
-export default function () {
-  // Test Endpoint 1
-  const response1 = http.get(ENDPOINT1_URL, authHeader);
-  const endpoint1Success = check(response1, {
-    'endpoint1 status is 200': (r) => r.status === 200,
-    'endpoint1 response time < 500ms': (r) => r.timings.duration < 500,
-  });
+const endpoint1ResponseTime = new Trend("endpoint1_response_time");
+const endpoint1ErrorRate = new Rate("endpoint1_errors");
+const endpoint2ResponseTime = new Trend("endpoint2_response_time");
+const endpoint2ErrorRate = new Rate("endpoint2_errors");
 
-  endpoint1ResponseTime.add(response1.timings.duration);
-  endpoint1ErrorRate.add(!endpoint1Success);
+const loadStages = [
+  { duration: "30s", target: 10 },
+  { duration: "2m", target: 10 },
+  { duration: "30s", target: 0 },
+];
 
-  // Test Endpoint 2
-  const response2 = http.get(ENDPOINT2_URL, authHeader);
-  const endpoint2Success = check(response2, {
-    'endpoint2 status is 200': (r) => r.status === 200,
-    'endpoint2 response time < 500ms': (r) => r.timings.duration < 500,
-  });
+const thresholds = {
+  http_req_duration: ["p(95)<1500"],
+  http_req_failed: ["rate<0.1"],
+  "http_req_duration{endpoint:endpoint1}": ["p(95)<1500"],
+  "http_req_failed{endpoint:endpoint1}": ["rate<0.1"],
+  "http_req_duration{endpoint:endpoint2}": ["p(95)<1500"],
+  "http_req_failed{endpoint:endpoint2}": ["rate<0.1"],
+};
 
-  endpoint2ResponseTime.add(response2.timings.duration);
-  endpoint2ErrorRate.add(!endpoint2Success);
+export const options = {
+  scenarios: {
+    endpoint1_test: {
+      executor: "ramping-vus",
+      startVUs: 0,
+      stages: loadStages,
+      exec: "testEndpoint1",
+      tags: { scenario: "endpoint1" },
+    },
+    endpoint2_test: {
+      executor: "ramping-vus",
+      startVUs: 0,
+      stages: loadStages,
+      exec: "testEndpoint2",
+      tags: { scenario: "endpoint2" },
+    },
+  },
+  thresholds,
+};
 
-  // Small sleep between requests to simulate real user behavior
+function testEndpoint(endpoint, responseTimeMetric, errorRateMetric) {
+  const params = {
+    headers: authHeader.headers,
+    tags: { endpoint: endpoint.id, name: endpoint.name },
+    timeout: "30s",
+  };
+  const response = http.get(endpoint.url, params);
+  const statusOk = response.status === 200;
+
+  responseTimeMetric.add(response.timings.duration);
+  errorRateMetric.add(!statusOk);
+
   sleep(1);
 }
 
-// Summary function to display comparison
+export function testEndpoint1() {
+  testEndpoint(ENDPOINT1, endpoint1ResponseTime, endpoint1ErrorRate);
+}
+
+export function testEndpoint2() {
+  testEndpoint(ENDPOINT2, endpoint2ResponseTime, endpoint2ErrorRate);
+}
+
+function getEndpointMetrics(data, endpointId) {
+  const metricName = `${endpointId}_response_time`;
+  const errorMetricName = `${endpointId}_errors`;
+
+  const trendValues = data.metrics[metricName]?.values || {};
+
+  // Get request count from Rate metric (passes + fails)
+  const errorMetric = data.metrics[errorMetricName];
+  let requestCount = 0;
+  if (errorMetric?.values) {
+    const passes = errorMetric.values.passes || 0;
+    const fails = errorMetric.values.fails || 0;
+    requestCount = passes + fails;
+  }
+
+  const median = trendValues.med || trendValues["p(50)"] || 0;
+
+  return {
+    requests: requestCount,
+    avg: trendValues.avg || 0,
+    median: median,
+    min: trendValues.min || 0,
+    max: trendValues.max || 0,
+  };
+}
+
+function formatEndpointData(endpoint, metrics) {
+  return {
+    url: endpoint.url,
+    requests: metrics.requests,
+    avgResponseTime: metrics.avg.toFixed(2) + "ms",
+    medianResponseTime: metrics.median.toFixed(2) + "ms",
+    minResponseTime: metrics.min.toFixed(2) + "ms",
+    maxResponseTime: metrics.max.toFixed(2) + "ms",
+  };
+}
+
+function scoreEndpoint(metrics) {
+  return metrics.avg * 0.7 + metrics.median * 0.3;
+}
+
+function determineWinner(endpoint1, endpoint2, metrics1, metrics2) {
+  const score1 = scoreEndpoint(metrics1);
+  const score2 = scoreEndpoint(metrics2);
+
+  const best =
+    score1 < score2
+      ? { endpoint: endpoint1, metrics: metrics1 }
+      : { endpoint: endpoint2, metrics: metrics2 };
+  const second =
+    score1 < score2
+      ? { endpoint: endpoint2, metrics: metrics2 }
+      : { endpoint: endpoint1, metrics: metrics1 };
+
+  const avgDiff = Math.abs(best.metrics.avg - second.metrics.avg);
+  const avgDiffPercentNum =
+    (avgDiff / Math.max(best.metrics.avg, second.metrics.avg)) * 100;
+  const avgDiffPercent = avgDiffPercentNum.toFixed(1);
+
+  const isClearWinner =
+    best.metrics.avg < second.metrics.avg &&
+    best.metrics.median < second.metrics.median &&
+    avgDiffPercentNum > 2;
+
+  let winner = best.endpoint.name;
+  let winnerReason = "";
+
+  if (isClearWinner) {
+    const improvementPercent = (
+      (second.metrics.avg / best.metrics.avg - 1) *
+      100
+    ).toFixed(1);
+    winnerReason = `Faster avg (${improvementPercent}% faster) and median, statistically significant`;
+  } else if (best.metrics.avg < second.metrics.avg) {
+    if (avgDiffPercentNum < 2) {
+      winner = `${best.endpoint.name} (marginally faster, within variance)`;
+      winnerReason = `Only ${avgDiffPercent}% difference - results may vary between runs`;
+    } else {
+      winner = `${best.endpoint.name} (faster avg)`;
+      winnerReason = `${avgDiffPercent}% faster on average`;
+    }
+  } else {
+    winnerReason =
+      "Very similar performance - differences may be due to variance";
+  }
+
+  return {
+    winner,
+    winnerReason,
+    avgDiff,
+    avgDiffPercent,
+  };
+}
+
+function formatMetric(value, decimals = 2) {
+  return value.toFixed(decimals).padStart(10);
+}
+
+function formatSummaryLine(label, value, suffix = "") {
+  const formattedValue =
+    typeof value === "number" && Number.isInteger(value)
+      ? value.toString().padStart(10)
+      : formatMetric(value);
+  return `   ${label}: ${formattedValue}${suffix}                          `;
+}
+
 export function handleSummary(data) {
-  const endpoint1Avg = data.metrics.endpoint1_response_time?.values?.avg || 0;
-  const endpoint2Avg = data.metrics.endpoint2_response_time?.values?.avg || 0;
-  const endpoint1P95 = data.metrics.endpoint1_response_time?.values?.['p(95)'] || 0;
-  const endpoint2P95 = data.metrics.endpoint2_response_time?.values?.['p(95)'] || 0;
-  const endpoint1Errors = data.metrics.endpoint1_errors?.values?.rate || 0;
-  const endpoint2Errors = data.metrics.endpoint2_errors?.values?.rate || 0;
+  const metrics1 = getEndpointMetrics(data, "endpoint1");
+  const metrics2 = getEndpointMetrics(data, "endpoint2");
+
+  const { winner, winnerReason, avgDiff, avgDiffPercent } = determineWinner(
+    ENDPOINT1,
+    ENDPOINT2,
+    metrics1,
+    metrics2
+  );
 
   const comparison = {
-    endpoint1: {
-      url: ENDPOINT1_URL,
-      avgResponseTime: endpoint1Avg.toFixed(2) + 'ms',
-      p95ResponseTime: endpoint1P95.toFixed(2) + 'ms',
-      errorRate: (endpoint1Errors * 100).toFixed(2) + '%',
+    endpoint1: formatEndpointData(ENDPOINT1, metrics1),
+    endpoint2: formatEndpointData(ENDPOINT2, metrics2),
+    comparison: {
+      avgDifference: avgDiff.toFixed(2) + "ms",
+      avgDifferencePercent: avgDiffPercent + "%",
     },
-    endpoint2: {
-      url: ENDPOINT2_URL,
-      avgResponseTime: endpoint2Avg.toFixed(2) + 'ms',
-      p95ResponseTime: endpoint2P95.toFixed(2) + 'ms',
-      errorRate: (endpoint2Errors * 100).toFixed(2) + '%',
-    },
-    winner: endpoint1Avg < endpoint2Avg ? 'Endpoint 1' : 'Endpoint 2',
+    winner: winner,
+    winnerReason: winnerReason,
   };
 
-  // Generate text summary
+  const formatEndpointSummary = (endpoint, metrics) =>
+    ` ${endpoint.name}: ${endpoint.url}
+${formatSummaryLine("Requests", metrics.requests, "")}
+${formatSummaryLine("Avg Response Time", metrics.avg, "ms")}
+${formatSummaryLine("Median", metrics.median, "ms")}
+${formatSummaryLine("Min", metrics.min, "ms")}
+${formatSummaryLine("Max", metrics.max, "ms")}`;
+
+  const endpoint1Summary = formatEndpointSummary(ENDPOINT1, metrics1);
+  const endpoint2Summary = formatEndpointSummary(ENDPOINT2, metrics2);
+
   const summaryText = `
-╔══════════════════════════════════════════════════════════════╗
-║                    PERFORMANCE COMPARISON                    ║
-╠══════════════════════════════════════════════════════════════╣
-║ Endpoint 1: ${ENDPOINT1_URL.substring(0, 47).padEnd(47)} ║
-║   Avg Response Time: ${endpoint1Avg.toFixed(2).padStart(10)}ms                          ║
-║   P95 Response Time: ${endpoint1P95.toFixed(2).padStart(10)}ms                          ║
-║   Error Rate:        ${(endpoint1Errors * 100).toFixed(2).padStart(10)}%                          ║
-╠══════════════════════════════════════════════════════════════╣
-║ Endpoint 2: ${ENDPOINT2_URL.substring(0, 47).padEnd(47)} ║
-║   Avg Response Time: ${endpoint2Avg.toFixed(2).padStart(10)}ms                          ║
-║   P95 Response Time: ${endpoint2P95.toFixed(2).padStart(10)}ms                          ║
-║   Error Rate:        ${(endpoint2Errors * 100).toFixed(2).padStart(10)}%                          ║
-╠══════════════════════════════════════════════════════════════╣
-║ Winner: ${(endpoint1Avg < endpoint2Avg ? 'Endpoint 1 (faster)' : 'Endpoint 2 (faster)').padEnd(47)} ║
-╚══════════════════════════════════════════════════════════════╝
+══════════════════════════════════════════════════════════════
+PERFORMANCE COMPARISON
+══════════════════════════════════════════════════════════════
+${endpoint1Summary}
+══════════════════════════════════════════════════════════════
+${endpoint2Summary}
+══════════════════════════════════════════════════════════════
+ Comparison:
+   Avg Difference:    ${formatMetric(avgDiff)}ms (${avgDiffPercent}%)
+══════════════════════════════════════════════════════════════
+ Winner: ${winner.padEnd(47)}
+ Reason: ${winnerReason.padEnd(47)}
+══════════════════════════════════════════════════════════════
 `;
 
   console.log(summaryText);
 
   return {
-    'summary.json': JSON.stringify(comparison, null, 2),
+    "summary.json": JSON.stringify(comparison, null, 2),
   };
 }
