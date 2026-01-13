@@ -1,6 +1,6 @@
 # k6 Load Tester - API Endpoint Comparison
 
-A simple load testing script using k6 to compare the performance of two API endpoints with HTTP basic authentication.
+A load testing script using k6 to compare the performance of two API endpoints with HTTP basic authentication. Each endpoint is tested in an isolated scenario for accurate comparison.
 
 ## Prerequisites
 
@@ -37,24 +37,31 @@ k6 run loadtest.js
 
 ### Custom Load Profile
 
-Edit the `options` object in `loadtest.js` to customize:
+Edit the `loadStages` array in `loadtest.js` to customize:
 
 - Number of virtual users
 - Test duration
 - Ramp-up/ramp-down patterns
-- Performance thresholds
 
 Example for a quick test:
 
 ```javascript
-export const options = {
-  stages: [
-    { duration: "10s", target: 5 },
-    { duration: "20s", target: 5 },
-    { duration: "10s", target: 0 },
-  ],
-};
+const loadStages = [
+  { duration: "10s", target: 5 },
+  { duration: "20s", target: 5 },
+  { duration: "10s", target: 0 },
+];
 ```
+
+## Test Configuration
+
+The default test runs for **3 minutes**:
+
+- **30s**: Ramp up to 10 users
+- **2m**: Steady state at 10 users
+- **30s**: Ramp down to 0 users
+
+Each endpoint is tested in a separate isolated scenario running in parallel, ensuring accurate comparison without interference.
 
 ## Output
 
@@ -65,36 +72,46 @@ The script generates:
 
 ## Metrics Tracked
 
-- **Response Times**: Average and 95th percentile for each endpoint
-- **Error Rates**: Percentage of failed requests
-- **HTTP Status Codes**: Success/failure rates
-- **Comparison**: Automatically identifies the faster endpoint
+- **Requests**: Total number of requests made
+- **Avg Response Time**: Average response time
+- **Median**: Median response time
+- **Min**: Minimum response time
+- **Max**: Maximum response time
+- **Comparison**: Automatically identifies the faster endpoint with statistical significance
+
+## Thresholds
+
+The script includes performance thresholds:
+
+- P95 response time < 1500ms
+- Error rate < 10%
+
+Threshold violations are reported but don't stop the test.
 
 ## Customization
 
-### Change HTTP Method
+### Change Endpoint Names
 
-To test POST endpoints, modify the `http.get()` calls:
+Edit the `name` field in `ENDPOINT1` and `ENDPOINT2` objects:
 
 ```javascript
-const response1 = http.post(
-  ENDPOINT1_URL,
-  JSON.stringify({ key: "value" }),
-  authHeader
-);
+const ENDPOINT1 = {
+  id: "endpoint1",
+  name: "Your Custom Name",
+  url: __ENV.ENDPOINT1_URL || "URL_HERE",
+};
 ```
 
-### Add Request Body
+### Change HTTP Method
+
+To test POST endpoints, modify the `testEndpoint` function:
 
 ```javascript
-const payload = JSON.stringify({ key: "value" });
-const response1 = http.post(ENDPOINT1_URL, payload, {
-  ...authHeader,
-  headers: {
-    ...authHeader.headers,
-    "Content-Type": "application/json",
-  },
-});
+const response = http.post(
+  endpoint.url,
+  JSON.stringify({ key: "value" }),
+  params
+);
 ```
 
 ### Adjust Authentication
@@ -113,19 +130,27 @@ const authHeader = {
 ## Example Output
 
 ```
-╔══════════════════════════════════════════════════════════════╗
-║                    PERFORMANCE COMPARISON                    ║
-╠══════════════════════════════════════════════════════════════╣
-║ Endpoint 1: https://api1.example.com/endpoint               ║
-║   Avg Response Time:     125.50ms                          ║
-║   P95 Response Time:     250.30ms                          ║
-║   Error Rate:              0.00%                          ║
-╠══════════════════════════════════════════════════════════════╣
-║ Endpoint 2: https://api2.example.com/endpoint               ║
-║   Avg Response Time:     180.75ms                          ║
-║   P95 Response Time:     320.10ms                          ║
-║   Error Rate:              2.50%                          ║
-╠══════════════════════════════════════════════════════════════╣
-║ Winner: Endpoint 1 (faster)                                 ║
-╚══════════════════════════════════════════════════════════════╝
+══════════════════════════════════════════════════════════════
+PERFORMANCE COMPARISON
+══════════════════════════════════════════════════════════════
+ Test: https://api1.example.com/endpoint
+   Requests:        146
+   Avg Response Time:     717.58ms
+   Median:     700.65ms
+   Min:     623.73ms
+   Max:    1064.61ms
+══════════════════════════════════════════════════════════════
+ Baseline: https://api2.example.com/endpoint
+   Requests:        146
+   Avg Response Time:     715.42ms
+   Median:     693.35ms
+   Min:     599.53ms
+   Max:    1043.17ms
+══════════════════════════════════════════════════════════════
+ Comparison:
+   Avg Difference:          2.16ms (0.3%)
+══════════════════════════════════════════════════════════════
+ Winner: Baseline (marginally faster, within variance)
+ Reason: Only 0.3% difference - results may vary between runs
+══════════════════════════════════════════════════════════════
 ```
